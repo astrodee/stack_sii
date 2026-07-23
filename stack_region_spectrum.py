@@ -164,6 +164,20 @@ def two_gaussians_linear_model_reparam(wave, amp1, cen1, sigma1, ratio, sigma2, 
     return slope * wave + intercept + g1 + g2
 
 
+def _propagate_uncertainty(grad, pcov):
+    """
+    Standard linear error propagation: variance of f = grad^T . pcov . grad,
+    where grad is the vector of partial derivatives of f with respect to
+    each fit parameter, evaluated at the best-fit point.
+    """
+    grad = np.asarray(grad, dtype=float)
+    var = float(grad @ pcov @ grad)
+    if var < 0:
+        # Can happen with a poorly-conditioned covariance matrix; clip to 0.
+        var = 0.0
+    return np.sqrt(var)
+
+
 def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -235,15 +249,62 @@ def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
     total_flux1 = amp1 * sigma1 * np.sqrt(2.0 * np.pi)
     total_flux2 = amp2 * sigma2 * np.sqrt(2.0 * np.pi)
 
+    # ---- Uncertainty propagation ----
+    # Parameter order in popt/pcov: [amp1, cen1, sigma1, ratio, sigma2, slope, intercept]
+    # indices:                        0     1     2       3      4      5      6
+    sqrt2pi = np.sqrt(2.0 * np.pi)
+
+    # amp1: direct fit parameter
+    amp1_err = np.sqrt(max(pcov[0, 0], 0.0))
+
+    # cen1: direct fit parameter
+    cen1_err = np.sqrt(max(pcov[1, 1], 0.0))
+
+    # sigma1: direct fit parameter
+    sigma1_err = np.sqrt(max(pcov[2, 2], 0.0))
+
+    # cen2 = cen1 + LINE_OFFSET_ANGSTROM (fixed offset) -> same uncertainty as cen1
+    cen2_err = cen1_err
+
+    # sigma2: direct fit parameter
+    sigma2_err = np.sqrt(max(pcov[4, 4], 0.0))
+
+    # amp2 = amp1 * ratio -> propagate via d(amp2)/d(amp1)=ratio, d(amp2)/d(ratio)=amp1
+    grad_amp2 = np.zeros(7)
+    grad_amp2[0] = ratio
+    grad_amp2[3] = amp1
+    amp2_err = _propagate_uncertainty(grad_amp2, pcov)
+
+    # total_flux1 = amp1 * sigma1 * sqrt(2*pi)
+    grad_tf1 = np.zeros(7)
+    grad_tf1[0] = sigma1 * sqrt2pi
+    grad_tf1[2] = amp1 * sqrt2pi
+    total_flux1_err = _propagate_uncertainty(grad_tf1, pcov)
+
+    # total_flux2 = amp1 * ratio * sigma2 * sqrt(2*pi)
+    grad_tf2 = np.zeros(7)
+    grad_tf2[0] = ratio * sigma2 * sqrt2pi
+    grad_tf2[3] = amp1 * sigma2 * sqrt2pi
+    grad_tf2[4] = amp1 * ratio * sqrt2pi
+    total_flux2_err = _propagate_uncertainty(grad_tf2, pcov)
+
     return {
         "popt_reparam": popt,
         "pcov_reparam": pcov,
         "sigma_inst": sigma_inst,
         "cen1_bounds": (cen1_lo, cen1_hi),
-        "gaussian1": {"total_flux": total_flux1, "sigma": sigma1,
-                      "central_wavelength": cen1, "amplitude": amp1},
-        "gaussian2": {"total_flux": total_flux2, "sigma": sigma2,
-                      "central_wavelength": cen2, "amplitude": amp2},
+        "gaussian1": {
+            "total_flux": total_flux1, "total_flux_err": total_flux1_err,
+            "sigma": sigma1, "sigma_err": sigma1_err,
+            "central_wavelength": cen1, "central_wavelength_err": cen1_err,
+            "amplitude": amp1, "amplitude_err": amp1_err,
+        },
+        "gaussian2": {
+            "total_flux": total_flux2, "total_flux_err": total_flux2_err,
+            "sigma": sigma2, "sigma_err": sigma2_err,
+            "central_wavelength": cen2, "central_wavelength_err": cen2_err,
+            "amplitude": amp2, "amplitude_err": amp2_err,
+        },
     }
 
 
@@ -337,11 +398,15 @@ def main():
                      MIN_AMP_RATIO, MAX_AMP_RATIO))
             print("  cen1 search bounds=[%.3f, %.3f]" % fit_result["cen1_bounds"])
             print("  Gaussian 1 (shorter wavelength):")
-            print("      total_flux=%.6g sigma=%.6g central_wavelength=%.6g amplitude=%.6g"
-                  % (g1["total_flux"], g1["sigma"], g1["central_wavelength"], g1["amplitude"]))
+            print("      total_flux = %.6g +/- %.3g" % (g1["total_flux"], g1["total_flux_err"]))
+            print("      sigma      = %.6g +/- %.3g" % (g1["sigma"], g1["sigma_err"]))
+            print("      center     = %.6g +/- %.3g" % (g1["central_wavelength"], g1["central_wavelength_err"]))
+            print("      amplitude  = %.6g +/- %.3g" % (g1["amplitude"], g1["amplitude_err"]))
             print("  Gaussian 2 (longer wavelength, offset=+%.1f A):" % LINE_OFFSET_ANGSTROM)
-            print("      total_flux=%.6g sigma=%.6g central_wavelength=%.6g amplitude=%.6g"
-                  % (g2["total_flux"], g2["sigma"], g2["central_wavelength"], g2["amplitude"]))
+            print("      total_flux = %.6g +/- %.3g" % (g2["total_flux"], g2["total_flux_err"]))
+            print("      sigma      = %.6g +/- %.3g" % (g2["sigma"], g2["sigma_err"]))
+            print("      center     = %.6g +/- %.3g" % (g2["central_wavelength"], g2["central_wavelength_err"]))
+            print("      amplitude  = %.6g +/- %.3g" % (g2["amplitude"], g2["amplitude_err"]))
 
             if len(wave_plot_f) > 0:
                 wave_model = np.linspace(np.nanmin(wave_plot_f), np.nanmax(wave_plot_f), 2000)
