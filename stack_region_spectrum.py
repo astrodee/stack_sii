@@ -22,6 +22,9 @@ LINE_OFFSET_ANGSTROM = 14.4   # cen2 = cen1 + LINE_OFFSET_ANGSTROM (fixed)
 MAX_SIGMA_ANGSTROM = 5.0      # sigma1, sigma2 <= this
 MIN_AMP_RATIO = 0.1           # amp2/amp1 bounds; enforces mutual >=0.1x
 MAX_AMP_RATIO = 10.0
+CEN1_SEARCH_HALF_WIDTH = 7.0   # cen1 is only allowed to vary +/- this many Angstrom
+                                # around --line1-guess, to stop the fit drifting
+                                # onto unrelated noise/features far from the guess.
 
 
 def parse_args():
@@ -43,7 +46,9 @@ def parse_args():
     p.add_argument("--fit-gaussians", action="store_true",
                    help="Fit two-Gaussian + linear baseline model and overplot it.")
     p.add_argument("--line1-guess", type=float, default=None,
-                   help="Initial guess for Gaussian 1 central wavelength.")
+                   help="Initial guess for Gaussian 1 central wavelength. Also used to "
+                        "bound cen1 to +/- %.1f Angstrom (see CEN1_SEARCH_HALF_WIDTH)."
+                        % CEN1_SEARCH_HALF_WIDTH)
     p.add_argument("--outplot", default="stacked_spectrum.png", help="Output plot filename")
     p.add_argument("--outspec", default="stacked_spectrum.txt", help="Output ASCII spectrum table")
     return p.parse_args()
@@ -175,7 +180,10 @@ def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
 
     sigma_inst = instrumental_sigma_floor(redshift)
 
-    cen1_guess = float(line1_guess) if line1_guess is not None else wave_fit[np.nanargmax(flux_fit)]
+    if line1_guess is None:
+        cen1_guess = wave_fit[np.nanargmax(flux_fit)]
+    else:
+        cen1_guess = float(line1_guess)
 
     amp1_guess = float(np.nanmax(flux_fit) - np.nanmedian(flux_fit))
     if amp1_guess <= 0:
@@ -191,8 +199,25 @@ def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
 
     amp_bound = 10.0 * max(abs(amp1_guess), 1.0)
 
-    lower_bounds = [-amp_bound, wave_fit.min(), sigma_inst, MIN_AMP_RATIO, sigma_inst, -np.inf, -np.inf]
-    upper_bounds = [amp_bound, wave_fit.max(), MAX_SIGMA_ANGSTROM, MAX_AMP_RATIO,
+    # cen1 is bounded tightly around the user's guess (+/- CEN1_SEARCH_HALF_WIDTH
+    # Angstrom) so the fit cannot drift onto an unrelated peak/noise feature far
+    # from the expected line. If no guess was given, fall back to the full
+    # fitted wavelength range.
+    if line1_guess is None:
+        cen1_lo = wave_fit.min()
+        cen1_hi = wave_fit.max()
+    else:
+        cen1_lo = max(wave_fit.min(), cen1_guess - CEN1_SEARCH_HALF_WIDTH)
+        cen1_hi = min(wave_fit.max(), cen1_guess + CEN1_SEARCH_HALF_WIDTH)
+        if cen1_hi <= cen1_lo:
+            raise ValueError(
+                "cen1 search window collapsed to empty range. Check --line1-guess "
+                "(%.3f) against the fitted wavelength range [%.3f, %.3f]."
+                % (cen1_guess, wave_fit.min(), wave_fit.max())
+            )
+
+    lower_bounds = [-amp_bound, cen1_lo, sigma_inst, MIN_AMP_RATIO, sigma_inst, -np.inf, -np.inf]
+    upper_bounds = [amp_bound, cen1_hi, MAX_SIGMA_ANGSTROM, MAX_AMP_RATIO,
                      MAX_SIGMA_ANGSTROM, np.inf, np.inf]
 
     p0 = np.clip(p0, lower_bounds, upper_bounds)
@@ -214,6 +239,7 @@ def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
         "popt_reparam": popt,
         "pcov_reparam": pcov,
         "sigma_inst": sigma_inst,
+        "cen1_bounds": (cen1_lo, cen1_hi),
         "gaussian1": {"total_flux": total_flux1, "sigma": sigma1,
                       "central_wavelength": cen1, "amplitude": amp1},
         "gaussian2": {"total_flux": total_flux2, "sigma": sigma2,
@@ -309,6 +335,7 @@ def main():
             print("  sigma_inst=%.4f, sigma bounds=[%.4f, %.1f], amp ratio bounds=[%.2f, %.2f]"
                   % (fit_result["sigma_inst"], fit_result["sigma_inst"], MAX_SIGMA_ANGSTROM,
                      MIN_AMP_RATIO, MAX_AMP_RATIO))
+            print("  cen1 search bounds=[%.3f, %.3f]" % fit_result["cen1_bounds"])
             print("  Gaussian 1 (shorter wavelength):")
             print("      total_flux=%.6g sigma=%.6g central_wavelength=%.6g amplitude=%.6g"
                   % (g1["total_flux"], g1["sigma"], g1["central_wavelength"], g1["amplitude"]))
