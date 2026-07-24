@@ -4,6 +4,14 @@ Stack (sum) spectra from a rectangular pixel region in an MPDAF cube, with
 optional wavelength restriction, de-redshift, and a two-Gaussian + linear
 baseline fit overplotted on the flux spectrum.
 
+Also computes the flux ratio (Gaussian 1 / Gaussian 2), its uncertainty,
+and an electron density estimate derived from that ratio using:
+
+    a = 0.4315
+    b = 2107
+    c = 627.1
+    ne = (c*ratio - a*b) / (a - ratio)
+
 Requirements: pip install mpdaf matplotlib numpy scipy
 """
 
@@ -25,6 +33,12 @@ MAX_AMP_RATIO = 10.0
 CEN1_SEARCH_HALF_WIDTH = 7.0   # cen1 is only allowed to vary +/- this many Angstrom
                                 # around --line1-guess, to stop the fit drifting
                                 # onto unrelated noise/features far from the guess.
+
+# Electron density calibration constants: ne = (c*R - a*b) / (a - R), where
+# R = flux(Gaussian 1) / flux(Gaussian 2).
+DENSITY_A = 0.4315
+DENSITY_B = 2107.0
+DENSITY_C = 627.1
 
 
 def parse_args():
@@ -178,6 +192,17 @@ def _propagate_uncertainty(grad, pcov):
     return np.sqrt(var)
 
 
+def compute_density(ratio_value):
+    """
+    ne = (c*R - a*b) / (a - R), using the fixed calibration constants
+    DENSITY_A, DENSITY_B, DENSITY_C.
+    """
+    denom = DENSITY_A - ratio_value
+    if denom == 0:
+        return float("nan")
+    return (DENSITY_C * ratio_value - DENSITY_A * DENSITY_B) / denom
+
+
 def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -288,6 +313,37 @@ def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
     grad_tf2[4] = amp1 * ratio * sqrt2pi
     total_flux2_err = _propagate_uncertainty(grad_tf2, pcov)
 
+    # ---- Flux ratio (G1/G2) and its uncertainty ----
+    # flux_ratio = total_flux1 / total_flux2
+    #            = (amp1*sigma1*sqrt2pi) / (amp1*ratio*sigma2*sqrt2pi)
+    #            = sigma1 / (ratio * sigma2)
+    # Note: amp1 cancels out algebraically, so flux_ratio depends only on
+    # sigma1, ratio, and sigma2.
+    flux_ratio = sigma1 / (ratio * sigma2)
+
+    grad_flux_ratio = np.zeros(7)
+    grad_flux_ratio[2] = 1.0 / (ratio * sigma2)                     # d/d(sigma1)
+    grad_flux_ratio[3] = -sigma1 / (ratio**2 * sigma2)               # d/d(ratio)
+    grad_flux_ratio[4] = -sigma1 / (ratio * sigma2**2)               # d/d(sigma2)
+    flux_ratio_err = _propagate_uncertainty(grad_flux_ratio, pcov)
+
+    # ---- Electron density from flux ratio, with upper/lower bounds from
+    # propagating +/- 1 sigma on the flux ratio through the density formula.
+    # The density formula is not necessarily monotonic-safe near R = a, so we
+    # evaluate at R, R-err, R+err and report the min/max as lower/upper.
+    density_center = compute_density(flux_ratio)
+    density_at_lo_ratio = compute_density(flux_ratio - flux_ratio_err)
+    density_at_hi_ratio = compute_density(flux_ratio + flux_ratio_err)
+
+    density_candidates = [density_at_lo_ratio, density_at_hi_ratio]
+    finite_candidates = [d for d in density_candidates if np.isfinite(d)]
+    if finite_candidates:
+        density_lower = min(finite_candidates)
+        density_upper = max(finite_candidates)
+    else:
+        density_lower = float("nan")
+        density_upper = float("nan")
+
     return {
         "popt_reparam": popt,
         "pcov_reparam": pcov,
@@ -305,6 +361,11 @@ def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
             "central_wavelength": cen2, "central_wavelength_err": cen2_err,
             "amplitude": amp2, "amplitude_err": amp2_err,
         },
+        "flux_ratio": flux_ratio,
+        "flux_ratio_err": flux_ratio_err,
+        "density": density_center,
+        "density_lower": density_lower,
+        "density_upper": density_upper,
     }
 
 
@@ -407,6 +468,12 @@ def main():
             print("      sigma      = %.6g +/- %.3g" % (g2["sigma"], g2["sigma_err"]))
             print("      center     = %.6g +/- %.3g" % (g2["central_wavelength"], g2["central_wavelength_err"]))
             print("      amplitude  = %.6g +/- %.3g" % (g2["amplitude"], g2["amplitude_err"]))
+            print("  Flux ratio (G1/G2):")
+            print("      ratio      = %.6g +/- %.3g" % (fit_result["flux_ratio"], fit_result["flux_ratio_err"]))
+            print("  Electron density (from ratio, a=%.4f b=%.1f c=%.1f):"
+                  % (DENSITY_A, DENSITY_B, DENSITY_C))
+            print("      density    = %.6g (lower=%.6g, upper=%.6g)"
+                  % (fit_result["density"], fit_result["density_lower"], fit_result["density_upper"]))
 
             if len(wave_plot_f) > 0:
                 wave_model = np.linspace(np.nanmin(wave_plot_f), np.nanmax(wave_plot_f), 2000)
