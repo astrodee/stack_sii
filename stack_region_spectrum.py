@@ -5,12 +5,18 @@ optional wavelength restriction, de-redshift, and a two-Gaussian + linear
 baseline fit overplotted on the flux spectrum.
 
 Also computes the flux ratio (Gaussian 1 / Gaussian 2), its uncertainty,
-and an electron density estimate derived from that ratio using:
+an electron density estimate derived from that ratio using:
 
     a = 0.4315
     b = 2107
     c = 627.1
     ne = (c*ratio - a*b) / (a - ratio)
+
+and a signal-to-noise ratio for the spectrum, computed over a window that
+starts 5 Angstrom below Gaussian 1's center and ends 5 Angstrom above
+Gaussian 2's center:
+
+    S/N = Sum(flux) / sqrt(Sum(variance))
 
 Requirements: pip install mpdaf matplotlib numpy scipy
 """
@@ -39,6 +45,10 @@ CEN1_SEARCH_HALF_WIDTH = 7.0   # cen1 is only allowed to vary +/- this many Angs
 DENSITY_A = 0.4315
 DENSITY_B = 2107.0
 DENSITY_C = 627.1
+
+# Signal-to-noise window padding (Angstrom) applied outward from the two
+# Gaussian centers: window = [cen1 - SN_PAD_ANGSTROM, cen2 + SN_PAD_ANGSTROM]
+SN_PAD_ANGSTROM = 5.0
 
 
 def parse_args():
@@ -201,6 +211,49 @@ def compute_density(ratio_value):
     if denom == 0:
         return float("nan")
     return (DENSITY_C * ratio_value - DENSITY_A * DENSITY_B) / denom
+
+
+def compute_signal_to_noise(wave, flux, variance, cen1, cen2, pad=SN_PAD_ANGSTROM):
+    """
+    Compute S/N = Sum(flux) / sqrt(Sum(variance)) over the window
+    [cen1 - pad, cen2 + pad], using only finite flux/variance points.
+
+    Returns a dict with the S/N value and the window bounds used.
+    """
+    wave = np.asarray(wave, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+    variance = np.asarray(variance, dtype=float)
+
+    win_lo = cen1 - pad
+    win_hi = cen2 + pad
+    if win_hi <= win_lo:
+        raise ValueError(
+            "S/N window collapsed to empty range: [%.3f, %.3f] (cen1=%.3f, cen2=%.3f, pad=%.1f)"
+            % (win_lo, win_hi, cen1, cen2, pad)
+        )
+
+    mask = (wave >= win_lo) & (wave <= win_hi) & np.isfinite(flux) & np.isfinite(variance)
+    if not np.any(mask):
+        raise ValueError(
+            "No finite flux/variance points found in S/N window [%.3f, %.3f]." % (win_lo, win_hi)
+        )
+
+    flux_sum = float(np.sum(flux[mask]))
+    var_sum = float(np.sum(variance[mask]))
+
+    if var_sum <= 0:
+        raise ValueError("Summed variance in S/N window is <= 0 (%.6g); cannot compute S/N." % var_sum)
+
+    sn = flux_sum / np.sqrt(var_sum)
+
+    return {
+        "sn": sn,
+        "flux_sum": flux_sum,
+        "var_sum": var_sum,
+        "window_lo": win_lo,
+        "window_hi": win_hi,
+        "n_points": int(np.count_nonzero(mask)),
+    }
 
 
 def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
@@ -474,6 +527,18 @@ def main():
                   % (DENSITY_A, DENSITY_B, DENSITY_C))
             print("      density    = %.6g (lower=%.6g, upper=%.6g)"
                   % (fit_result["density"], fit_result["density_lower"], fit_result["density_upper"]))
+
+            try:
+                sn_result = compute_signal_to_noise(
+                    wave_f, flux_sum, var_sum,
+                    g1["central_wavelength"], g2["central_wavelength"],
+                )
+                print("  Signal-to-noise (window=[%.3f, %.3f], n_points=%d):"
+                      % (sn_result["window_lo"], sn_result["window_hi"], sn_result["n_points"]))
+                print("      S/N        = %.6g (flux_sum=%.6g, var_sum=%.6g)"
+                      % (sn_result["sn"], sn_result["flux_sum"], sn_result["var_sum"]))
+            except Exception as e:
+                print("[WARN] Signal-to-noise calculation failed: %s" % e)
 
             if len(wave_plot_f) > 0:
                 wave_model = np.linspace(np.nanmin(wave_plot_f), np.nanmax(wave_plot_f), 2000)
