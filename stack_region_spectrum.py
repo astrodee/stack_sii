@@ -16,7 +16,7 @@ and a signal-to-noise ratio for the spectrum, computed over a window that
 starts 5 Angstrom below Gaussian 1's center and ends 5 Angstrom above
 Gaussian 2's center:
 
-    S/N = Sum(flux) / sqrt(Sum(variance))
+    S/N = Sum(flux) / Sum(sqrt(variance))
 
 Requirements: pip install mpdaf matplotlib numpy scipy
 """
@@ -215,7 +215,7 @@ def compute_density(ratio_value):
 
 def compute_signal_to_noise(wave, flux, variance, cen1, cen2, pad=SN_PAD_ANGSTROM):
     """
-    Compute S/N = Sum(flux) / sqrt(Sum(variance)) over the window
+    Compute S/N = Sum(flux) / Sum(sqrt(variance)) over the window
     [cen1 - pad, cen2 + pad], using only finite flux/variance points.
 
     Returns a dict with the S/N value and the window bounds used.
@@ -239,17 +239,17 @@ def compute_signal_to_noise(wave, flux, variance, cen1, cen2, pad=SN_PAD_ANGSTRO
         )
 
     flux_sum = float(np.sum(flux[mask]))
-    var_sum = float(np.sum(variance[mask]))
+    noise_sum = float(np.sum(np.sqrt(variance[mask])))
 
-    if var_sum <= 0:
-        raise ValueError("Summed variance in S/N window is <= 0 (%.6g); cannot compute S/N." % var_sum)
+    if noise_sum <= 0:
+        raise ValueError("Summed sqrt(variance) in S/N window is <= 0 (%.6g); cannot compute S/N." % noise_sum)
 
-    sn = flux_sum / np.sqrt(var_sum)
+    sn = flux_sum / noise_sum
 
     return {
         "sn": sn,
         "flux_sum": flux_sum,
-        "var_sum": var_sum,
+        "noise_sum": noise_sum,
         "window_lo": win_lo,
         "window_hi": win_hi,
         "n_points": int(np.count_nonzero(mask)),
@@ -535,8 +535,8 @@ def main():
                 )
                 print("  Signal-to-noise (window=[%.3f, %.3f], n_points=%d):"
                       % (sn_result["window_lo"], sn_result["window_hi"], sn_result["n_points"]))
-                print("      S/N        = %.6g (flux_sum=%.6g, var_sum=%.6g)"
-                      % (sn_result["sn"], sn_result["flux_sum"], sn_result["var_sum"]))
+                print("      S/N        = %.6g (flux_sum=%.6g, noise_sum=%.6g)"
+                      % (sn_result["sn"], sn_result["flux_sum"], sn_result["noise_sum"]))
             except Exception as e:
                 print("[WARN] Signal-to-noise calculation failed: %s" % e)
 
