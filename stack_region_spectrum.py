@@ -18,6 +18,9 @@ Gaussian 2's center:
 
     S/N = Sum(flux) / Sum(sqrt(variance))
 
+The bottom panel of the output plot shows the per-pixel S/N spectrum,
+computed as flux / sqrt(variance).
+
 Requirements: pip install mpdaf matplotlib numpy scipy
 """
 
@@ -256,6 +259,21 @@ def compute_signal_to_noise(wave, flux, variance, cen1, cen2, pad=SN_PAD_ANGSTRO
     }
 
 
+def compute_per_pixel_sn(wave, flux, variance):
+    """
+    Compute per-pixel S/N = flux / sqrt(variance) for the whole spectrum,
+    used for the bottom panel of the output plot. Points where variance is
+    non-finite or <= 0 are excluded.
+    """
+    wave = np.asarray(wave, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+    variance = np.asarray(variance, dtype=float)
+
+    mask = np.isfinite(wave) & np.isfinite(flux) & np.isfinite(variance) & (variance > 0)
+    sn = flux[mask] / np.sqrt(variance[mask])
+    return wave[mask], sn
+
+
 def fit_two_gaussians_linear(wave, flux, variance, redshift, line1_guess=None):
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -489,9 +507,9 @@ def main():
     print("[INFO] Saved spectrum table: %s" % args.outspec)
 
     wave_plot_f, flux_plot = clean_series(wave_f, flux_sum)
-    wave_plot_v, var_plot = clean_series(wave_v, var_sum)
+    wave_plot_sn, sn_plot = compute_per_pixel_sn(wave_v, flux_sum, var_sum)
 
-    if len(wave_plot_f) == 0 and len(wave_plot_v) == 0:
+    if len(wave_plot_f) == 0 and len(wave_plot_sn) == 0:
         raise RuntimeError("Nothing left to plot after cleaning NaN/Inf values.")
 
     fit_result = None
@@ -553,8 +571,8 @@ def main():
 
     if len(wave_plot_f) > 0:
         ax1.plot(wave_plot_f, flux_plot, color="tab:blue", lw=1.2, label="Stacked flux")
-    if len(wave_plot_v) > 0:
-        ax2.plot(wave_plot_v, var_plot, color="tab:red", lw=1.2)
+    if len(wave_plot_sn) > 0:
+        ax2.plot(wave_plot_sn, sn_plot, color="tab:red", lw=1.2)
 
     if model_curve is not None and wave_model is not None:
         ax1.plot(wave_model, model_curve, color="black", lw=1.5, ls="--", label="2-Gaussian + linear fit")
@@ -568,17 +586,17 @@ def main():
     if args.redshift != 0.0:
         wave_label += " (rest-frame, z=%s)" % args.redshift
     ax2.set_xlabel(wave_label)
-    ax2.set_ylabel("Summed Variance")
+    ax2.set_ylabel("S/N")
     ax2.grid(alpha=0.3)
 
-    all_wave_plot = wave_plot_f if len(wave_plot_f) > 0 else wave_plot_v
+    all_wave_plot = wave_plot_f if len(wave_plot_f) > 0 else wave_plot_sn
     if len(all_wave_plot) > 0:
         xmin, xmax = np.nanmin(all_wave_plot), np.nanmax(all_wave_plot)
         if xmax > xmin:
             ax1.set_xlim(xmin, xmax)
 
     ax1.set_ylim(*robust_ylim(flux_plot))
-    ax2.set_ylim(*robust_ylim(var_plot))
+    ax2.set_ylim(*robust_ylim(sn_plot))
 
     if len(all_wave_plot) > 0:
         wrange_txt = "%.2f - %.2f" % (np.nanmin(all_wave_plot), np.nanmax(all_wave_plot))
